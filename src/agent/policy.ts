@@ -149,9 +149,13 @@ const NATIVE_COVERED_CASES = ["shellArgs", "readArgs", "writeArgs", "grepArgs"] 
  * them); everything else gets one line. This replaces the old full policy text.
  */
 const CODEMODE_CONTRACT =
-  "mcp_pi_codemode(code) — Run JavaScript that calls other tools via tools.<name>(args) and text()/exit(). " +
-  "Hidden builtins stay callable: tools.bash({command}), tools.read({path}), tools.write({path, content}), tools.edit(...), " +
-  "tools.grep({pattern, path?, glob?, ignoreCase?}), tools.find({pattern}), tools.ls({path?}). Nested calls go through Pi permissions.";
+  "mcp_pi_codemode(code) — Run JavaScript (async function body; top-level await/return work) that calls host tools via tools.<name>(args). " +
+  "Emit output with text(value) or console.log(...); exit(code) ends the script early. " +
+  "Shell/file builtins are usually callable as tools.bash({command}), tools.read({path}), tools.write({path, content}), " +
+  "tools.grep({pattern, path?, glob?, ignoreCase?}), tools.find({pattern}) — but hosts may replace, rename, or " +
+  "remove them. If a call fails with 'does not exist', discover the real names with the GLOBALS " +
+  "ALL_TOOLS (array of descriptors with .name) or await searchTools(\"shell\") — those are globals, NOT tools.* members. " +
+  "Nested calls go through Pi permissions.";
 
 function extraContractLine(tool: IrTool): string {
   if (isCodemodeTool(tool)) return `- ${CODEMODE_CONTRACT}`;

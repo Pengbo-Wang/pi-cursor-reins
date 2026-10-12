@@ -965,7 +965,7 @@ test("T-AGENT-SESSION: only-mode native shell lifts to a codemode script; header
     const args = call.arguments ?? {};
     assert.equal(call.name, "codemode");
     assert.equal(typeof args.code, "string");
-    assert.match(String(args.code), /tools\.bash/);
+    assert.match(String(args.code), /\["bash","ctx_shell","shell","exec"\]/);
     assert.match(String(args.code), /echo hi/);
 
     const header = "Script completed\nWall time 0.1 seconds\nOutput:\nhi\n";

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { EXEC_CASES, EXEC_FIELD, encodeKvGetResult, encodeMcpSuccess, encodeRunRequest, encodeUserMessage } from "../src/proto/agent.ts";
 import { decideExec, rankAlternatives, rankedTools, rejectReason, stripCursorMcpToolName, cursorMcpToolName, unknownExecThrowMessage, matchToolFor, mcpContractText, isCodemodeTool } from "../src/agent/policy.ts";
 import { BlobStore } from "../src/agent/blob-store.ts";
-import { buildRootPromptMessages, splitCurrentUser, systemPromptRootMessage } from "../src/agent/root-prompt.ts";
+import { buildRootPromptMessages, isEmptyCurrentTurn, splitCurrentUser, systemPromptRootMessage } from "../src/agent/root-prompt.ts";
 import { buildAgentRequest } from "../src/agent/request.ts";
 import { MAX_BLOB_STORE_BYTES } from "../src/constants.ts";
 import { NATIVE_EXEC_REJECT } from "../src/errors.ts";
@@ -386,4 +386,21 @@ test("T-AGENT: mcpContractText pins codemode first even past the extras cap", ()
   assert.ok(text.indexOf("mcp_pi_codemode") < text.indexOf("mcp_pi_extra_0"));
   const listed = [...text.matchAll(/mcp_pi_extra_\d+/g)].length;
   assert.ok(listed <= 23, "codemode occupies one of the 24 extra slots");
+});
+
+test("T-AGENT: isEmptyCurrentTurn detects display-only steer messages", () => {
+  const irOf = (messages: InferenceIR["messages"]): InferenceIR => ir({ messages });
+  // pi-lsp diagnostics steer: custom message -> convertToLlm -> empty user turn
+  assert.equal(
+    isEmptyCurrentTurn(irOf([{ role: "user", text: "write main.c" }, { role: "assistant", text: "done" }, { role: "user", text: "" }])),
+    true,
+  );
+  assert.equal(isEmptyCurrentTurn(irOf([{ role: "user", text: "   " }])), true, "whitespace-only is empty too");
+  assert.equal(isEmptyCurrentTurn(irOf([{ role: "user", text: "hi" }])), false);
+  assert.equal(
+    isEmptyCurrentTurn(irOf([{ role: "user", text: "", images: [{ data: "AAAA", mimeType: "image/png" }] }])),
+    false,
+    "an image-only turn is not empty",
+  );
+  assert.equal(isEmptyCurrentTurn(irOf([{ role: "assistant", text: "x" }])), false, "no user message at all");
 });

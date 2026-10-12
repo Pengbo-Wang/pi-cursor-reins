@@ -37,6 +37,7 @@ import type { IrEvent } from "../session/ir.ts";
 import { irHasImages } from "../agent/images.ts";
 import { runSession } from "../session/index.ts";
 import { runAgentSession, agentOrigin } from "../agent/index.ts";
+import { isEmptyCurrentTurn } from "../agent/root-prompt.ts";
 import { debugEnabled, debugLog } from "../transport/debug.ts";
 
 function asConfig(rows: ProviderModelRow[]): ProviderModelConfig[] {
@@ -91,6 +92,17 @@ export function streamSimple(
       const payload = await options?.onPayload?.(ir, model);
       const used = payload === undefined ? ir : (payload as typeof ir);
       stream.push({ type: "start", partial: output });
+      // Display-only custom messages (e.g. pi-lsp diagnostics steer with
+      // content:"") reach us as an empty user turn: pi-lsp delivers the summary
+      // to the TUI via details, and pi core drops details in convertToLlm. There
+      // is nothing for the model to answer — short-circuit with an empty done
+      // instead of opening a remote turn that re-sends the whole context.
+      if (isEmptyCurrentTurn(used)) {
+        output.stopReason = "stop";
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+        return;
+      }
       const channel = selectedChannel();
       if (channel === "inference" && irHasImages(used)) {
         throw localError(

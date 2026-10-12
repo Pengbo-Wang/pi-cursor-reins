@@ -90,7 +90,12 @@ export function buildStreamRequest(ir: InferenceIR, invocationId: string): Infer
   if (ir.systemPrompt !== "") {
     messages.push({ role: InferenceMessageRole.SYSTEM, text: ir.systemPrompt });
   }
-  for (const m of ir.messages) messages.push(toCore(m));
+  for (const m of ir.messages) {
+    // Display-only custom messages arrive as empty user turns (pi core drops
+    // `details` in convertToLlm); they carry no information for the model.
+    if (m.role === "user" && (m.text ?? "").trim() === "" && (m.images ?? []).length === 0) continue;
+    messages.push(toCore(m));
+  }
   const frame = encodeSizeCheck(messages, ir);
   void frame;
   return {

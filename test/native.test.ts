@@ -8,6 +8,7 @@ import {
   decodeNativeArgs,
   encodeNativeResultFromPi,
   nativeExecMode,
+  readFailureText,
   translateNativeToPi,
   unwrapCodemodeResult,
   type NativeArgs,
@@ -379,32 +380,93 @@ test("T-NATIVE: declared bash wins over codemode; only-mode synthesizes a { code
   const only = translateNativeToPi(args, [codeMode]);
   assert.equal(only?.tool.name, "codemode");
   const script = String(only?.args.code);
-  assert.match(script, /tools\.bash/);
+  assert.match(script, /\["bash","ctx_shell","shell","exec"\]/, "executor is resolved at runtime, never hardcoded");
+  assert.match(script, /ALL_TOOLS/, "a missing executor fails listing the full tool roster");
   assert.match(script, /cd -- '\/tmp' && echo hi/);
 
   const read = translateNativeToPi({ case: "readArgs", path: "a.txt" }, [codeMode]);
   assert.equal(read?.tool.name, "codemode");
-  assert.match(String(read?.args.code), /tools\.read\(\{ path: "a.txt" \}\)/);
+  assert.match(String(read?.args.code), /\["read","ctx_read"\]/);
+  assert.match(String(read?.args.code), /\{ path: "a\.txt" \}/);
 
   const write = translateNativeToPi({ case: "writeArgs", path: "b.txt", contents: "body" }, [codeMode]);
-  assert.match(String(write?.args.code), /tools\.write/);
+  assert.match(String(write?.args.code), /\["write","ctx_write"\]/);
 
   const del = translateNativeToPi({ case: "deleteArgs", path: "gone.txt" }, [codeMode]);
-  assert.match(String(del?.args.code), /tools\.bash/);
+  assert.match(String(del?.args.code), /\["bash","ctx_shell"/);
   assert.match(String(del?.args.code), /D0:%s/);
 
   const grep = translateNativeToPi(
     { case: "grepArgs", pattern: "needle", glob: "*.ts", path: "/src", caseInsensitive: true, outputMode: "content" },
     [codeMode],
   );
-  assert.match(String(grep?.args.code), /tools\.grep/);
+  assert.match(String(grep?.args.code), /\["grep","ctx_grep","ffgrep"\]/);
   assert.match(String(grep?.args.code), /ignoreCase/);
 
   const glob = translateNativeToPi(
     { case: "grepArgs", pattern: "", glob: "**/*.ts", path: "/src", caseInsensitive: false, outputMode: "files_with_matches" },
     [codeMode],
   );
-  assert.match(String(glob?.args.code), /tools\.find/);
+  assert.match(String(glob?.args.code), /\["find","fffind","ctx_find"\]/);
+});
+
+test("T-NATIVE: synthesized scripts pick a replacement tool when the builtin is absent", async () => {
+  // Reproduces the live pi 1.1.0 + lean-ctx failure: tools.bash is gone from the
+  // codemode sandbox; the script must fall back to ctx_shell, and must fail with
+  // the tool roster when no candidate exists.
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+    ...args: string[]
+  ) => (...fnArgs: unknown[]) => Promise<unknown>;
+  // The real codemode sandbox exposes `tools` as a proxy that THROWS on missing
+  // members (pi 1.1.0 QuickJS bridge); replicate that so the test catches probes
+  // that only work with plain objects.
+  const throwingTools = (impl: Record<string, unknown>): Record<string, unknown> =>
+    new Proxy(impl, {
+      get(target, prop) {
+        if (typeof prop === "string" && !(prop in target)) throw new TypeError(`tools.${prop} does not exist`);
+        return Reflect.get(target, prop);
+      },
+    });
+  const runScript = async (script: string, tools: Record<string, unknown>): Promise<string> => {
+    const out: string[] = [];
+    const fn = new AsyncFunction("tools", "ALL_TOOLS", "text", "exit", script);
+    await fn(
+      throwingTools(tools),
+      [{ name: "ctx_shell" }],
+      (v: unknown) => out.push(String(v)),
+      (code?: number) => {
+        if (code) throw new Error(`exit ${code}`);
+      },
+    );
+    return out.join("");
+  };
+
+  const shell = translateNativeToPi({ case: "shellArgs", command: "echo hi", workingDirectory: "", timeoutMs: 0 }, [codeMode]);
+  const shellText = await runScript(String(shell?.args.code), {
+    ctx_shell: async ({ command }: { command: string }) => ({ output: `ran: ${command}`, exit_code: 0 }),
+  });
+  assert.equal(shellText, "ran: echo hi");
+
+  await assert.rejects(
+    runScript(String(shell?.args.code), {}),
+    /no bash-capable tool.*available: ctx_shell/,
+    "no candidate -> error names the available tools",
+  );
+
+  const read = translateNativeToPi({ case: "readArgs", path: "a.txt" }, [codeMode]);
+  const readText = await runScript(String(read?.args.code), {
+    ctx_read: async ({ path }: { path: string }) => `content of ${path}`,
+  });
+  assert.equal(readText, "content of a.txt");
+
+  const grep = translateNativeToPi(
+    { case: "grepArgs", pattern: "needle", glob: "", path: "", caseInsensitive: false, outputMode: "content" },
+    [codeMode],
+  );
+  const grepText = await runScript(String(grep?.args.code), {
+    ffgrep: async ({ pattern }: { pattern: string }) => `hit: ${pattern}`,
+  });
+  assert.equal(grepText, "hit: needle");
 });
 
 test("T-NATIVE: unwrapCodemodeResult strips the script header and marks failed scripts", () => {
@@ -437,4 +499,32 @@ test("T-NATIVE: unwrapCodemodeResult strips the script header and marks failed s
     skipUnknown(reader, wire, field);
   });
   assert.equal(arm, 2, "failed script header maps to the native error arm");
+});
+
+test("T-NATIVE: read of a missing file returns clean not-found guidance, other errors pass through", () => {
+  // Live-found (composer-2.5, pi 1.1.0): a raw ENOENT text containing the word
+  // access made the model blame sandboxing and retry Read instead of Writing.
+  const guidance = readFailureText("main.c", "Script error:\nError: ENOENT: no such file or directory, access '/x/main.c'");
+  assert.match(guidance, /File does not exist: main\.c/);
+  assert.match(guidance, /Write tool/);
+  assert.ok(!/access|ENOENT/.test(guidance), "raw error noise must not leak");
+
+  const other = readFailureText("main.c", "permission denied: main.c");
+  assert.equal(other, "permission denied: main.c", "non-not-found errors pass through verbatim");
+
+  // The wire shape uses the guidance on the error arm.
+  const reply = encodeNativeResultFromPi(
+    { case: "readArgs", path: "main.c" },
+    "Error: ENOENT: no such file or directory, access '/x/main.c'",
+    true,
+  );
+  let errText = "";
+  forEachField(reply.frames[0]!.resultBytes, (f, w, r) => {
+    if (f !== 2) return skipUnknown(r, w, f);
+    forEachField(expectBytes(r, w), (f2, w2, r2) => {
+      if (f2 === 2) errText = expectString(r2, w2);
+      else skipUnknown(r2, w2, f2);
+    });
+  });
+  assert.match(errText, /File does not exist: main\.c/);
 });

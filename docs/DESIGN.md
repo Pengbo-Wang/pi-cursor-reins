@@ -14,7 +14,7 @@ no local execution, no agent loop of its own.
 
 ```
 ┌─────────────────────────── pi (host) ────────────────────────────┐
-│  session files · permission-system · lean-ctx · tool execution   │
+│  session files · permission-system · allowlists · tool execution │
 └───────────────▲────────────────────────────────┬─────────────────┘
                 │ AssistantMessage event stream   │ TranscriptContext
 ┌───────────────┴────────────────────────────────▼─────────────────┐
@@ -76,8 +76,8 @@ no local execution, no agent loop of its own.
   fixed system identity sources into a stable hash.
 - **L2 produces `{machineId, macMachineId?}`; checksum concatenation and base64 happen at L3** (the
   timestamp is a request-scope value).
-- **Whitelisted command table** (the seed of SPEC's T-IDENT-CMDS, and the only set lean-ctx needs to
-  allow):
+- **Whitelisted command table** (the seed of SPEC's T-IDENT-CMDS, and the only set a host command
+  allowlist needs to permit):
 
   | platform | collection (fixed argv; linux prefers direct file reads, no subprocess) |
   |---|---|

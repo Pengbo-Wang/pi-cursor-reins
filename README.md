@@ -67,7 +67,7 @@ Headless: `pi -p --model cursor/<id> "…"`. Try `cursor/composer-2.5`, `cursor/
 
 ## Compatibility
 
-Tested host: **pi 0.99.x and 1.0.0** (peer range `>=0.99.0 <1.2.0`; deliberately narrow — widen only after live testing).
+Tested host: **pi 0.99.x, 1.0.0 and 1.1.0** (peer range `>=0.99.0 <1.2.0`; deliberately narrow — widen only after live testing).
 Node ≥ 22. No build step: pi loads `src/index.ts` via jiti.
 
 This is an independent, unofficial implementation. It is not affiliated with Cursor, and Cursor may
@@ -91,8 +91,9 @@ This provider has already destroyed the AgentService stream. Confirm with
 (mcp, llama.cpp, codemode).
 
 When Pi hides declared bash/read/write (`codemode.mode=only`), native Shell/Read/Write/Grep still
-execute: the provider synthesizes a `codemode` `{ code }` script. Default (`mode=on`) keeps the
-direct declared-tool path.
+execute: the provider synthesizes a `codemode` `{ code }` script that resolves its executor at
+runtime from a capability-ordered candidate list, so hosts that replace or rename the builtin
+tools keep working. Default (`mode=on`) keeps the direct declared-tool path.
 
 ## Development
 

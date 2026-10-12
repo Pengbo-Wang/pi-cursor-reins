@@ -75,6 +75,19 @@ export function splitCurrentUser(ir: InferenceIR): { history: IrMessage[]; userT
   return { history: messages.slice(0, lastUser), userText, userImages };
 }
 
+/**
+ * True when the live (last) user message carries no text and no images — e.g. a
+ * display-only custom message (pi-lsp diagnostics steer) that pi core convertToLlm
+ * turns into `{role:"user", text:""}`. Opening a remote turn for it re-sends the
+ * whole context and the model answers the emptiness itself ("the user sent an
+ * empty message"). History replay already skips such messages (the `if (text)`
+ * guard in buildRootPromptMessages); this covers the current-turn path.
+ */
+export function isEmptyCurrentTurn(ir: InferenceIR): boolean {
+  if (!ir.messages.some((m) => m.role === "user")) return false;
+  const { userText, userImages } = splitCurrentUser(ir);
+  return userText.trim() === "" && userImages.length === 0;
+}
 export function trailingToolResults(
   ir: InferenceIR,
 ): Map<string, { result: string; isError: boolean; images: IrImage[] }> {

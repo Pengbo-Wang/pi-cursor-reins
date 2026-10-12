@@ -4,8 +4,10 @@
  * to a regular Pi `tool_call` (capability-matched via rankedTools, never a
  * hardcoded declared-tool name); Pi's permission system stays the execution authority.
  * When declared bash/read/write are hidden (`codemode.mode=only`), the same
- * execs synthesize a `codemode` `{ code }` script that calls `tools.bash` / `tools.read`
- * / … — still via Pi, never Cursor-side exec.
+ * execs synthesize a `codemode` `{ code }` script. The script resolves its executor
+ * at RUNTIME from a capability-ordered candidate list because the provider cannot see
+ * which `tools.*` members the sandbox actually exposes — hosts may replace or rename
+ * the builtins. Still via Pi, never Cursor-side exec.
  * When the tool result comes back, it is encoded into the native success/error
  * wire shape (PROTOCOL-AGENT §5.1).
  *
@@ -416,20 +418,58 @@ function bashCommand(command: string, cwd: string): string {
   return `cd -- ${shellQuote(cwd)} && ${command}`;
 }
 
+/**
+ * Runtime tool resolution for synthesized scripts. In `codemode.mode=only` the
+ * declared tool list holds only `codemode`, so the provider CANNOT see which
+ * tools the sandbox exposes as `tools.*` members (a host may replace bash/grep/find
+ * with its own tool names). Resolve from a capability-ordered
+ * candidate list and fail with the full roster when none exists — never a
+ * hardcoded name. `ALL_TOOLS` is a codemode global (array of descriptors with
+ * `.name`), not a `tools.*` member.
+ */
+function pickToolLines(candidates: string[]): string[] {
+  // The codemode `tools` object is a THROWING proxy (QuickJS): reading a missing
+  // member raises TypeError instead of returning undefined, so every probe needs
+  // its own try/catch or the first absent candidate kills the whole lookup.
+  return [
+    `const __tool = ${JSON.stringify(candidates)}.map((n) => { try { return tools[n]; } catch { return undefined; } }).find((f) => typeof f === "function");`,
+    `if (!__tool) throw new Error(${JSON.stringify(`no ${candidates[0]}-capable tool (tried ${candidates.join(", ")}); available: `)} + ALL_TOOLS.map((t) => t.name).join(", "));`,
+  ];
+}
+
+/** pi `bash` resolves to `{ output, exit_code, … }`; drop-in replacements may resolve to plain text. */
+function emitShellResultLines(): string[] {
+  return [
+    `if (typeof r === "string") { text(r); }`,
+    `else { text(r?.output ?? JSON.stringify(r)); if (r?.exit_code) exit(1); }`,
+  ];
+}
+
+function emitTextResultLines(): string[] {
+  return [`text(typeof r === "string" ? r : JSON.stringify(r));`];
+}
+
 function bashScript(command: string): string {
   return [
-    `const r = await tools.bash({ command: ${JSON.stringify(command)} });`,
-    `text(r.output ?? "");`,
-    `if (r.exit_code) exit(1);`,
+    ...pickToolLines(["bash", "ctx_shell", "shell", "exec"]),
+    `const r = await __tool({ command: ${JSON.stringify(command)} });`,
+    ...emitShellResultLines(),
   ].join("\n");
 }
 
 function readScript(pathArg: string): string {
-  return `text(await tools.read({ path: ${JSON.stringify(pathArg)} }));`;
+  return [
+    ...pickToolLines(["read", "ctx_read"]),
+    `const r = await __tool({ path: ${JSON.stringify(pathArg)} });`,
+    ...emitTextResultLines(),
+  ].join("\n");
 }
 
 function writeScript(pathArg: string, contents: string): string {
-  return `await tools.write({ path: ${JSON.stringify(pathArg)}, content: ${JSON.stringify(contents)} });`;
+  return [
+    ...pickToolLines(["write", "ctx_write"]),
+    `await __tool({ path: ${JSON.stringify(pathArg)}, content: ${JSON.stringify(contents)} });`,
+  ].join("\n");
 }
 
 function grepScript(args: Extract<NativeArgs, { case: "grepArgs" }>): string {
@@ -437,13 +477,21 @@ function grepScript(args: Extract<NativeArgs, { case: "grepArgs" }>): string {
   if (args.path !== "") call.path = args.path;
   if (args.glob !== "") call.glob = args.glob;
   if (args.caseInsensitive) call.ignoreCase = true;
-  return `text(await tools.grep(${JSON.stringify(call)}));`;
+  return [
+    ...pickToolLines(["grep", "ctx_grep", "ffgrep"]),
+    `const r = await __tool(${JSON.stringify(call)});`,
+    ...emitTextResultLines(),
+  ].join("\n");
 }
 
 function findScript(glob: string, pathArg: string): string {
   const call: Record<string, unknown> = { pattern: glob };
   if (pathArg !== "") call.path = pathArg;
-  return `text(await tools.find(${JSON.stringify(call)}));`;
+  return [
+    ...pickToolLines(["find", "fffind", "ctx_find"]),
+    `const r = await __tool(${JSON.stringify(call)});`,
+    ...emitTextResultLines(),
+  ].join("\n");
 }
 
 function deleteScript(pathArg: string): string {
@@ -593,6 +641,21 @@ export function unwrapCodemodeResult(text: string, isError: boolean): { text: st
 }
 
 /**
+ * A read of a NONEXISTENT file must say so plainly. Raw pi/codemode errors read
+ * like [Script error: Error: ENOENT: no such file or directory, access ...] —
+ * the word access makes models blame sandboxing/permissions (measured live:
+ * composer-2.5 retried Read 4x, concluded the Write tool may be sandboxed, and
+ * never issued a Write). The reference Cursor client reports a clean file-does-
+ * not-exist and the model proceeds straight to Write. Match that, and say the
+ * one thing that unblocks the create flow: Write needs no prior Read.
+ * Failure semantics are preserved — this stays on the error arm; a missing file
+ * is never disguised as an empty-but-existing one (overwrite risk).
+ */
+export function readFailureText(pathArg: string, text: string): string {
+  if (!/ENOENT|no such file|not found|does not exist/i.test(text)) return text;
+  return `File does not exist: ${pathArg}. To create it, use the Write tool — Write does not require a prior Read.`;
+}
+/**
  * Encode a Pi tool result into the native exec success/error wire shape.
  * Failure is reported on the native error arm so the model sees a real tool
  * outcome, not a provider refusal.
@@ -623,7 +686,7 @@ export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError
     }
     case "readArgs": {
       if (isError) {
-        return { frames: [{ resultField: 7, resultBytes: readError(args.path, text) }], closeStream: true, summary: `pi read error` };
+        return { frames: [{ resultField: 7, resultBytes: readError(args.path, readFailureText(args.path, text)) }], closeStream: true, summary: `pi read error` };
       }
       const truncated = /\[.*truncat|\[Showing (lines|last)/i.test(text);
       return {

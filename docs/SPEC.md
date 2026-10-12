@@ -34,7 +34,7 @@ both stopped. Hence this project — maintain only the thin "inference protocol"
 
 1. **The audit guarantee holds**: the model cannot execute anything locally through the Cursor side.
    Every local action must go through pi's tool system, hence through pi's permission system and
-   lean-ctx allowlist.
+   any configured command allowlist.
 2. **Resume works**: after `pi resume` or a new process selects this provider's models, conversation
    memory is intact.
 3. **Maintainable**: clean layering; Cursor protocol drift and pi version drift each have a single

@@ -4,6 +4,52 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/).
 
+## 0.3.2 — 2026-10-12
+
+- **pi 1.1.0 verified.** Typecheck and the full offline suite (109 tests) pass against
+  `@earendil-works/pi-ai` / `pi-coding-agent` 1.1.0; the agent channel was live-tested
+  end-to-end with `cursor/composer-2.5` on pi 1.1.0. No API changes were needed — the
+  peer range already covered it.
+
+- **Fixed: synthesized codemode scripts hardcoded builtin tool names.** In
+  `codemode.mode=only`, native Shell/Read/Write/Grep/Delete execs synthesize a `codemode`
+  script; the script called `tools.bash` / `tools.grep` / `tools.find` verbatim. Hosts that
+  replace the builtins (pi-lean-ctx `replace` mode exposes only `ctx_*`; pi-fff renames
+  find/grep to `fffind`/`ffgrep`) made every synthesized call fail with
+  `tools.bash does not exist`, and the remote model burned several turns probing for a
+  working name. Scripts now resolve their executor at runtime from a capability-ordered
+  candidate list (`bash` → `ctx_shell` → …) and fail with the full `ALL_TOOLS` roster when
+  no candidate exists. New test: T-NATIVE runtime-resolution coverage.
+
+- **Fixed: synthesized scripts broke on the throwing `tools` proxy of pi.** The runtime
+  resolver probed `tools[name]` directly; the QuickJS bridge raises TypeError on a
+  missing member instead of returning undefined, so the first absent candidate killed
+  the whole lookup (found live on pi 1.1.0). Probes are now individually try/catch-
+  wrapped, and the offline test replicates the throwing proxy.
+
+- **Fixed: reading a nonexistent file returned noisy error text that dead-ended
+  models.** The raw pi/codemode ENOENT text ([... no such file or directory,
+  access ...]) made composer-2.5 blame sandboxing and retry Read in a loop, never
+  issuing a Write (measured live; wire-decoded frames confirmed no Write ever
+  arrived). The native read error arm now rewrites not-found failures to a clean
+  [File does not exist: <path>. To create it, use the Write tool — Write does not
+  require a prior Read.] — failure semantics preserved (never disguised as an
+  empty-file success). Post-fix live runs: 1 Read then immediate pivot to a
+  working write path (was 4+ Reads). New: readFailureText + wire-shape tests.
+- **Fixed: display-only custom messages opened empty remote turns.** Extensions like
+  pi-lsp inject `content: ""` custom messages (diagnostics summary lives in `details`,
+  rendered TUI-only) with `deliverAs: "steer"`; the pi core convertToLlm turns them into
+  `{role:"user", text:""}` and drops `details`. The provider forwarded that as a live
+  user turn — a full context re-send that the model answered with confusion ("the user
+  sent an empty query"). `streamSimple` now short-circuits a content-free current user
+  turn with an immediate empty `done` (no remote call); the inference channel also
+  filters empty user messages from replayed history. New: `isEmptyCurrentTurn` tests.
+- **Fixed: the codemode MCP contract misdescribed the sandbox.** The one-line contract in
+  the client rules asserted "Hidden builtins stay callable" with fixed names and never
+  explained output/discovery, so models guessed `tools.ALL_TOOLS()` / `tools.searchTools()`
+  (both are globals, not `tools.*` members) and failed. The contract now describes
+  `text()`/`console.log`/`exit()`, states that builtin names vary by host, and points at
+  the `ALL_TOOLS` / `searchTools` globals for discovery.
 ## 0.3.1 — 2026-10-03
 
 - **Peer range widened to `>=0.99.0 <1.2.0`** (pi `1.0.0` live-tested end-to-end:
