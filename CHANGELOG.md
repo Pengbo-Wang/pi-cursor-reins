@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/).
 
+## 0.3.3 — 2026-10-20
+
+- **Fixed: Cursor Glob returned no file list when `ls` outranked `find`.** Glob is an empty-pattern `grep_args`. Capability ranking prefers `ls`, whose schema has no pattern, and the translator gave up instead of trying `find`. The fallback codemode script ran `find`, but its path list was encoded as a content match with an empty file, which Cursor drops. Glob now uses the first capable tool that accepts a pattern, and the result is encoded as `files_with_matches`.
+
 ## 0.3.2 — 2026-10-12
 
 - **pi 1.1.0 verified.** Typecheck and the full offline suite (109 tests) pass against

@@ -136,6 +136,13 @@ export function matchToolFor(execCase: string, tools: IrTool[]): IrTool | undefi
   return best !== undefined && best.s > 0 ? best.tool : undefined;
 }
 
+/** Every positive-score tool for this exec, best first. Zero-score tools are omitted. */
+export function capableTools(execCase: string, tools: IrTool[]): IrTool[] {
+  return scoredTools(execCase, tools)
+    .filter((row) => row.s > 0)
+    .map((row) => row.tool);
+}
+
 /** Exec cases the native translation layer serves (PROTOCOL-AGENT §5.1). */
 const NATIVE_COVERED_CASES = ["shellArgs", "readArgs", "writeArgs", "grepArgs"] as const;
 

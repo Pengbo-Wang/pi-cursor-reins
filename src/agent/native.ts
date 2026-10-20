@@ -18,7 +18,7 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isCodemodeTool, matchToolFor, schemaProperties } from "./policy.ts";
+import { capableTools, isCodemodeTool, matchToolFor, schemaProperties } from "./policy.ts";
 import { expectBytes, expectString, expectVarint, forEachField, skipUnknown, WireType } from "../proto/wire.ts";
 import type { DecodedExec } from "../proto/agent.ts";
 import type { IrTool } from "../session/ir.ts";
@@ -584,14 +584,18 @@ function translateDeclared(
     }
     case "grepArgs": {
       if (args.pattern === "" && args.glob !== "") {
-        // Cursor's "Glob" (PROTOCOL-AGENT §5.1): prefer a find/glob-capable tool.
-        const tool = matchToolFor("lsArgs", tools);
-        if (!tool) return null;
-        const keys = schemaProperties(tool);
-        const out: Record<string, unknown> = {};
-        if (!putIf(out, keys, ["pattern", "glob", "query"], args.glob)) return null;
-        if (args.path !== "") putIf(out, keys, ["path", "dir", "root"], args.path);
-        return { tool, args: out };
+        // Cursor's "Glob" (PROTOCOL-AGENT §5.1). `ls` outranks `find` by name, but
+        // its schema has no pattern, so keep walking until a tool can take the glob.
+        // Returning null here drops into a codemode script whose path list Cursor's
+        // Glob result does not accept.
+        for (const tool of capableTools("lsArgs", tools)) {
+          const keys = schemaProperties(tool);
+          const out: Record<string, unknown> = {};
+          if (!putIf(out, keys, ["pattern", "glob", "query"], args.glob)) continue;
+          if (args.path !== "") putIf(out, keys, ["path", "dir", "root"], args.path);
+          return { tool, args: out };
+        }
+        return null;
       }
       const tool = matchToolFor("grepArgs", tools);
       if (!tool) return null;
@@ -660,6 +664,27 @@ export function readFailureText(pathArg: string, text: string): string {
  * Failure is reported on the native error arm so the model sees a real tool
  * outcome, not a provider refusal.
  */
+
+/** Join codemode content blocks so a glob result is a path list, not a JSON blob. */
+function flattenToolText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("[")) return text;
+  try {
+    const value = JSON.parse(trimmed) as unknown;
+    if (!Array.isArray(value)) return text;
+    const parts = value.flatMap((item) => {
+      if (typeof item === "string") return [item];
+      if (item && typeof item === "object" && "text" in item && typeof (item as { text?: unknown }).text === "string") {
+        return [(item as { text: string }).text];
+      }
+      return [];
+    });
+    return parts.length > 0 ? parts.join("") : text;
+  } catch {
+    return text;
+  }
+}
+
 export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError: boolean): NativeReply {
   const unwrapped = unwrapCodemodeResult(text, isError);
   text = unwrapped.text;
@@ -733,7 +758,19 @@ export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError
       if (isError) {
         return { frames: [{ resultField: 5, resultBytes: grepError(text) }], closeStream: true, summary: `pi grep error` };
       }
-      const mode = args.outputMode;
+      // Glob is an empty pattern plus a glob. Cursor reads that result as a file
+      // list; a content match with an empty file is dropped ("didn't return the result").
+      const globOnly = args.pattern === "" && args.glob !== "";
+      const mode = globOnly ? "files_with_matches" : args.outputMode;
+      if (globOnly) {
+        text = flattenToolText(text);
+        const again = unwrapCodemodeResult(text, isError);
+        text = again.text;
+        isError = again.isError;
+        if (isError) {
+          return { frames: [{ resultField: 5, resultBytes: grepError(text) }], closeStream: true, summary: `pi grep error` };
+        }
+      }
       const union =
         mode === "files_with_matches"
           ? { files: text.split("\n").filter((l) => l.trim() !== "") }

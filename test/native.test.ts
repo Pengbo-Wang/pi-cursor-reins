@@ -370,6 +370,49 @@ const codeMode = tool(
   ["code"],
 );
 
+test("T-NATIVE: Glob skips ls, which has no pattern, and returns a file list", () => {
+  const ls = tool("ls", "List directory contents", { path: { type: "string" }, limit: { type: "number" } });
+  const find = tool("find", "Find files by glob pattern", { pattern: { type: "string" }, path: { type: "string" } });
+  const args: NativeArgs = {
+    case: "grepArgs",
+    pattern: "",
+    glob: "**/SKILL.md",
+    path: "/skills",
+    caseInsensitive: false,
+    outputMode: "content",
+  };
+  const hit = translateNativeToPi(args, [ls, find, codeMode]);
+  assert.equal(hit?.tool.name, "find");
+  assert.deepEqual(hit?.args, { pattern: "**/SKILL.md", path: "/skills" });
+
+  const reply = encodeNativeResultFromPi(args, "buddycli/SKILL.md\nwecom/SKILL.md\n", false);
+  const bytes = Buffer.from(reply.frames[0]?.resultBytes ?? new Uint8Array());
+  assert.ok(bytes.includes("files_with_matches"));
+  assert.ok(bytes.includes("buddycli/SKILL.md"));
+  assert.ok(!bytes.includes("Script completed"));
+
+  const wrapped = JSON.stringify([
+    { type: "text", text: "Script completed\nWall time 0.0 seconds\nOutput:\n" },
+    { type: "text", text: "buddycli/SKILL.md\nwecom/SKILL.md\n" },
+  ]);
+  const wrappedReply = encodeNativeResultFromPi(args, wrapped, false);
+  const wrappedBytes = Buffer.from(wrappedReply.frames[0]?.resultBytes ?? new Uint8Array());
+  assert.ok(wrappedBytes.includes("buddycli/SKILL.md"));
+  assert.ok(!wrappedBytes.includes("Script completed"));
+
+  const failed = encodeNativeResultFromPi(
+    args,
+    "Script failed\nWall time 0.0 seconds\nOutput:\nno find-capable tool",
+    false,
+  );
+  let arm = 0;
+  forEachField(failed.frames[0]?.resultBytes ?? new Uint8Array(), (field, wire, reader) => {
+    arm = field;
+    skipUnknown(reader, wire, field);
+  });
+  assert.equal(arm, 2, "a failed glob script stays on the error arm");
+});
+
 test("T-NATIVE: declared bash wins over codemode; only-mode synthesizes a { code } script", () => {
   const args: NativeArgs = { case: "shellArgs", command: "echo hi", workingDirectory: "/tmp", timeoutMs: 0 };
   const both = translateNativeToPi(args, [ctxShell, codeMode]);
