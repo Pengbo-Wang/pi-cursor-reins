@@ -8,6 +8,7 @@ import {
   decodeNativeArgs,
   encodeNativeResultFromPi,
   nativeExecMode,
+  parseReadOutput,
   readFailureText,
   translateNativeToPi,
   unwrapCodemodeResult,
@@ -597,4 +598,53 @@ test("T-NATIVE: an ENOENT read answers ReadResult.file_not_found so Cursor's Wri
     });
     assert.equal(arm, 2, "other read failures stay on the error arm");
   }
+});
+
+/** ReadResult.success (arm 1) → content + truncated flag. */
+function readSuccessOf(bytes: Uint8Array): { arm: number; content: string; truncated: boolean } {
+  const out = { arm: -1, content: "", truncated: false };
+  forEachField(bytes, (f, w, r) => {
+    out.arm = f;
+    if (f !== 1) return skipUnknown(r, w, f);
+    forEachField(expectBytes(r, w), (f2, w2, r2) => {
+      if (f2 === 2) out.content = expectString(r2, w2);
+      else if (f2 === 6) out.truncated = expectVarint(r2, w2) !== 0;
+      else skipUnknown(r2, w2, f2);
+    });
+  });
+  return out;
+}
+
+test("T-NATIVE: only Pi's trailing read notice marks a read truncated; file text never does", () => {
+  // Live-found: native.ts itself contains "/\[.*truncat" — the old content-wide regex
+  // flagged the read partial and Cursor refused to edit the file.
+  const source = 'const re = /\\[.*truncat|\\[Showing (lines|last)/i;\n// [Showing lines 1-2 of 9. Use offset=3 to continue.] mid-file\n';
+  assert.deepEqual(parseReadOutput(source), { content: source, truncated: false });
+  const encoded = readSuccessOf(encodeNativeResultFromPi({ case: "readArgs", path: "a.ts" }, source, false).frames[0]!.resultBytes);
+  assert.deepEqual(encoded, { arm: 1, content: source, truncated: false });
+
+  assert.deepEqual(parseReadOutput("l1\nl2\n\n[Showing lines 1-2 of 9. Use offset=3 to continue.]"), {
+    content: "l1\nl2",
+    truncated: true,
+    nextOffset: 3,
+  });
+  assert.deepEqual(parseReadOutput("l1\n\n[Showing lines 1-1 of 9 (50KB limit). Use offset=2 to continue.]"), {
+    content: "l1",
+    truncated: true,
+    nextOffset: 2,
+  });
+  assert.deepEqual(parseReadOutput("l1\n\n[8 more lines in file. Use offset=2 to continue.]"), {
+    content: "l1",
+    truncated: true,
+    nextOffset: 2,
+  });
+  assert.deepEqual(parseReadOutput("[Line 1 is 80KB, exceeds 50KB limit. Use bash: sed -n '1p' a | head -c 51200]"), {
+    content: "",
+    truncated: true,
+  });
+  const capped = readSuccessOf(
+    encodeNativeResultFromPi({ case: "readArgs", path: "a" }, "abc\n\n[pi-cursor-provider truncated this tool result.]", false)
+      .frames[0]!.resultBytes,
+  );
+  assert.deepEqual(capped, { arm: 1, content: "abc", truncated: true });
 });

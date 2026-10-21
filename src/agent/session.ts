@@ -59,6 +59,9 @@ import {
   encodeNativeResultFromPi,
   logNativeExec,
   nativeExecMode,
+  parseReadOutput,
+  PROVIDER_TRUNCATED_SUFFIX,
+  readOffsetKey,
   translateNativeToPi,
   tryNativeExecInproc,
   type NativeArgs,
@@ -89,6 +92,8 @@ export interface PendingMcp {
   ask?: AskQuestionLift;
   /** Re-sent when a late pending is re-yielded (continueRun). */
   arguments?: Record<string, unknown>;
+  /** Native read whose Pi tool pages large files: chunks gathered so far, continued via `offsetKey`. */
+  read?: { offsetKey: string; chunks: number; buffer: string };
 }
 
 interface ActiveRun {
@@ -141,7 +146,7 @@ function toolNames(tools: ReadonlyArray<{ name: string }>): string[] {
 
 function truncateToolText(text: string): string {
   if (text.length <= MAX_MCP_RESULT_CHARS) return text;
-  return `${text.slice(0, MAX_MCP_RESULT_CHARS)}\n\n[pi-cursor-provider truncated this tool result.]`;
+  return `${text.slice(0, MAX_MCP_RESULT_CHARS)}${PROVIDER_TRUNCATED_SUFFIX}`;
 }
 
 /** Append to the turn log and fan out live. The log is the resolved `events` payload; the fan-out is streaming. */
@@ -345,12 +350,29 @@ async function sendMcpResults(run: ActiveRun, ir: InferenceIR): Promise<void> {
       remaining.push(pending);
       continue;
     }
-    const text = truncateToolText(result.result);
+    let text = truncateToolText(result.result);
     if (pending.ask) {
       await run.bidi.write(
         encodeInteractionResponse(pending.id, 3, encodeAskQuestionFromPi(pending.ask, text, result.isError, result.details)),
       );
       continue;
+    }
+    if (pending.read && !result.isError) {
+      // Cursor edits a file only from a complete read, but Pi's read pages at
+      // 2000 lines / 50KB: keep the exec parked and fetch the next page.
+      const read = parseReadOutput(text);
+      const buffer = pending.read.chunks === 0 ? read.content : `${pending.read.buffer}\n${read.content}`;
+      if (read.nextOffset !== undefined && buffer.length < MAX_MCP_RESULT_CHARS) {
+        remaining.push({
+          ...pending,
+          toolCallId: crypto.randomUUID(),
+          arguments: { ...pending.arguments, [pending.read.offsetKey]: read.nextOffset },
+          read: { ...pending.read, chunks: pending.read.chunks + 1, buffer },
+        });
+        debugLog({ event: "agent-read-page", execId: pending.execId, offset: read.nextOffset, chars: buffer.length });
+        continue;
+      }
+      if (pending.read.chunks > 0 || read.truncated) text = read.truncated ? `${buffer}${PROVIDER_TRUNCATED_SUFFIX}` : buffer;
     }
     if (pending.native) {
       // Native exec translated to a Pi tool call: answer in the native shape
@@ -485,7 +507,16 @@ async function handleExec(run: ActiveRun, exec: DecodedExec): Promise<void> {
     const target = nativeArgs ? translateNativeToPi(nativeArgs, tools) : null;
     if (nativeArgs && target) {
       const toolCallId = crypto.randomUUID();
-      run.pending.push({ id: exec.id, execId: exec.execId, toolCallId, toolName: target.tool.name, native: nativeArgs });
+      const offsetKey = nativeArgs.case === "readArgs" ? readOffsetKey(target.tool) : undefined;
+      run.pending.push({
+        id: exec.id,
+        execId: exec.execId,
+        toolCallId,
+        toolName: target.tool.name,
+        native: nativeArgs,
+        arguments: target.args,
+        ...(offsetKey ? { read: { offsetKey, chunks: 0, buffer: "" } } : {}),
+      });
       armExecHeartbeat(run);
       debugLog({
         event: "agent-exec",

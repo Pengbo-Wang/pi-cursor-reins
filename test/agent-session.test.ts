@@ -1328,3 +1328,110 @@ test("T-AGENT-SESSION: AskQuestion without the Pi tool answers an error in-band,
     __resetAgentRunsForTests();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Native read paging: Cursor edits only from a complete read
+// ---------------------------------------------------------------------------
+
+const READ_TOOL = {
+  name: "read",
+  description: "Read the contents of a file",
+  jsonSchema: { type: "object", properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } } },
+};
+
+function readArgsFrame(pathArg: string, id: number): Uint8Array {
+  const exec = encodeFields((w) => {
+    writeUint32Always(w, 1, id);
+    writeBytesAlways(w, 7, encodeFields((pw) => writeString(pw, 1, pathArg)));
+    writeString(w, 15, "exec-read");
+  });
+  return encodeFields((w) => writeBytes(w, 2, exec));
+}
+
+/** (content, truncated) of a ReadResult.success reply, or undefined for other frames. */
+function readReplyOf(body: Uint8Array): { content: string; truncated: boolean } | undefined {
+  let result: Uint8Array | undefined;
+  forEachField(body, (field, wire, reader) => {
+    if (field !== 2) return skipUnknown(reader, wire, field);
+    forEachField(expectBytes(reader, wire), (f, w, r) => {
+      if (f === 7) result = new Uint8Array(expectBytes(r, w));
+      else skipUnknown(r, w, f);
+    });
+  });
+  if (!result) return undefined;
+  const out = { content: "", truncated: false };
+  forEachField(result, (f, w, r) => {
+    if (f !== 1) return skipUnknown(r, w, f);
+    forEachField(expectBytes(r, w), (f2, w2, r2) => {
+      if (f2 === 2) out.content = expectString(r2, w2);
+      else if (f2 === 6) out.truncated = expectVarint(r2, w2) !== 0;
+      else skipUnknown(r2, w2, f2);
+    });
+  });
+  return out;
+}
+
+test("T-AGENT-SESSION: a paged Pi read is continued by offset and answered once, complete", async () => {
+  __resetAgentRunsForTests();
+  const fake = await listen();
+  let opened = false;
+  const replies: { content: string; truncated: boolean }[] = [];
+  fake.onStream((stream) => {
+    stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+    const decoder = new ConnectFrameDecoder();
+    stream.on("data", (chunk: Uint8Array) => {
+      for (const frame of decoder.push(chunk)) {
+        if (frame.endOfStream) continue;
+        if (!opened) {
+          opened = true;
+          writeProto(stream, readArgsFrame("big.ts", 51));
+          continue;
+        }
+        const reply = readReplyOf(frame.body);
+        if (!reply) continue;
+        replies.push(reply);
+        writeProto(stream, textDelta("read it"));
+        writeProto(stream, turnEnded());
+        writeTrailer(stream);
+      }
+    });
+  });
+  try {
+    const base = (messages: InferenceIR["messages"]): InferenceIR => ir({ sessionId: "sess-page", tools: [READ_TOOL], messages });
+    const history: InferenceIR["messages"] = [{ role: "user", text: "ping" }];
+    const first = await runAgentSession({ token: "tok", ir: base(history), origin: fake.origin });
+    const call1 = first.events.find((e) => e.type === "tool_call");
+    assert.ok(call1 && call1.type === "tool_call");
+    assert.deepEqual(call1.arguments, { path: "big.ts" });
+
+    history.push(
+      { role: "assistant", toolCalls: [{ id: call1.id, name: "read", arguments: call1.arguments ?? {} }] },
+      {
+        role: "tool",
+        toolResult: {
+          toolCallId: call1.id,
+          toolName: "read",
+          result: "line1\nline2\n\n[Showing lines 1-2 of 3. Use offset=3 to continue.]",
+          isError: false,
+        },
+      },
+    );
+    const second = await runAgentSession({ token: "tok", ir: base(history), origin: fake.origin });
+    const call2 = second.events.find((e) => e.type === "tool_call");
+    assert.ok(call2 && call2.type === "tool_call");
+    assert.notEqual(call2.id, call1.id);
+    assert.deepEqual(call2.arguments, { path: "big.ts", offset: 3 }, "the next page is requested from Pi");
+    assert.equal(replies.length, 0, "Cursor is not answered with a partial read");
+
+    history.push(
+      { role: "assistant", toolCalls: [{ id: call2.id, name: "read", arguments: call2.arguments ?? {} }] },
+      { role: "tool", toolResult: { toolCallId: call2.id, toolName: "read", result: "line3\n", isError: false } },
+    );
+    const third = await runAgentSession({ token: "tok", ir: base(history), origin: fake.origin });
+    assert.equal(third.events.some((e) => e.type === "text" && e.delta === "read it"), true);
+    assert.deepEqual(replies, [{ content: "line1\nline2\nline3\n", truncated: false }]);
+  } finally {
+    fake.server.close();
+    __resetAgentRunsForTests();
+  }
+});

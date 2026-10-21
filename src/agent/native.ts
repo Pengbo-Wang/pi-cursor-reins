@@ -344,6 +344,32 @@ function readFileNotFound(pathArg: string): Uint8Array {
   });
 }
 
+/** Pi `read` continuation notices (core/tools/read.js) — appended only at the very end of the output. */
+const READ_CONTINUATION =
+  /\n\n\[(?:Showing lines \d+-\d+ of \d+(?: \([^)\]\n]*\))?|\d+ more lines in file)\. Use offset=(\d+) to continue\.\]$/;
+const READ_LINE_TOO_LONG = /^\[Line \d+ is [^\]\n]*, exceeds [^\]\n]* limit\. Use bash: [^\n]*\]$/;
+export const PROVIDER_TRUNCATED_SUFFIX = "\n\n[pi-cursor-provider truncated this tool result.]";
+
+/**
+ * Split a Pi read result into file content and its trailing truncation notice.
+ * Only the notice Pi appends counts: file content that merely mentions
+ * "[...truncated" must never mark the read partial (Cursor then refuses to edit).
+ */
+export function parseReadOutput(text: string): { content: string; truncated: boolean; nextOffset?: number } {
+  if (READ_LINE_TOO_LONG.test(text)) return { content: "", truncated: true };
+  if (text.endsWith(PROVIDER_TRUNCATED_SUFFIX)) {
+    return { content: text.slice(0, -PROVIDER_TRUNCATED_SUFFIX.length), truncated: true };
+  }
+  const m = READ_CONTINUATION.exec(text);
+  if (!m) return { content: text, truncated: false };
+  return { content: text.slice(0, m.index), truncated: true, nextOffset: Number(m[1]) };
+}
+
+/** Schema key a read tool takes a 1-based start line on, when it supports continuation. */
+export function readOffsetKey(tool: IrTool): string | undefined {
+  return isCodemodeTool(tool) ? undefined : schemaProperties(tool).find((k) => k === "offset");
+}
+
 /** Only a definite missing-path errno; looser "not found" text stays on the error arm (overwrite risk). */
 export function isFileNotFound(text: string): boolean {
   return /ENOENT|no such file or directory/i.test(text);
@@ -728,9 +754,14 @@ export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError
       if (isError) {
         return { frames: [{ resultField: 7, resultBytes: readError(args.path, readFailureText(args.path, text)) }], closeStream: true, summary: `pi read error` };
       }
-      const truncated = /\[.*truncat|\[Showing (lines|last)/i.test(text);
+      const read = parseReadOutput(text);
       return {
-        frames: [{ resultField: 7, resultBytes: readSuccess(args.path, text, text.split("\n").length, truncated) }],
+        frames: [
+          {
+            resultField: 7,
+            resultBytes: readSuccess(args.path, read.content, read.content.split("\n").length, read.truncated),
+          },
+        ],
         closeStream: true,
         summary: `pi read ${args.path}`,
       };

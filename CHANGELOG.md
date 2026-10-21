@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## Unreleased
 
+- **Fixed: Cursor refused to edit files it had read only partially.** A content-wide regex marked any file containing `[...truncat` as truncated (this repo's own `native.ts` included), and Cursor's edit tool then declined to write. Only Pi's trailing read notice counts now, and it is stripped from the content. Files beyond Pi's 2000-line / 50KB read page are fetched page by page via `offset` before Cursor is answered, up to 512KB; past that the read stays marked truncated.
+
 - **Fixed: Cursor Write could not create new files.** Cursor's Write reads the target first, and the ENOENT from Pi's `read` was encoded as `ReadResult.error`, so Cursor aborted before sending `writeArgs`. A definite missing-path error (ENOENT / "no such file or directory") now answers `ReadResult.file_not_found`; other read failures stay on the error arm.
 
 - **Fixed: Cursor AskQuestion never showed a questionnaire.** The interaction query was answered with `AskQuestionResult.error`, and models reported it as the user skipping the questions. It is now lifted to Pi's `ask_user_question` tool (rpiv-ask-user-question), so the questions render in Pi's UI, and the answer is encoded back as option ids and free text. Esc maps to `rejected`. Shapes Pi cannot render, or a missing tool, return an error that tells the model the user never saw the questions. Tool results now carry Pi's `details` into the IR (excluded from token estimates and never sent to Cursor).
