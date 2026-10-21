@@ -337,6 +337,18 @@ function readError(pathArg: string, error: string): Uint8Array {
   });
 }
 
+/** ReadResult.file_not_found (4): Cursor's Write reads first and proceeds to create only on this arm. */
+function readFileNotFound(pathArg: string): Uint8Array {
+  return encodeFields((w) => {
+    writeBytesAlways(w, 4, encodeFields((e) => writeString(e, 1, pathArg)));
+  });
+}
+
+/** Only a definite missing-path errno; looser "not found" text stays on the error arm (overwrite risk). */
+export function isFileNotFound(text: string): boolean {
+  return /ENOENT|no such file or directory/i.test(text);
+}
+
 function writeSuccess(pathArg: string, contents: string): Uint8Array {
   return encodeFields((w) => {
     writeBytesAlways(
@@ -710,6 +722,9 @@ export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError
       return { frames, closeStream: true, summary: `pi shellStream ${args.command.slice(0, 60)}` };
     }
     case "readArgs": {
+      if (isError && isFileNotFound(text)) {
+        return { frames: [{ resultField: 7, resultBytes: readFileNotFound(args.path) }], closeStream: true, summary: `pi read not found` };
+      }
       if (isError) {
         return { frames: [{ resultField: 7, resultBytes: readError(args.path, readFailureText(args.path, text)) }], closeStream: true, summary: `pi read error` };
       }

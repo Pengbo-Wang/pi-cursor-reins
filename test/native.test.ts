@@ -555,12 +555,8 @@ test("T-NATIVE: read of a missing file returns clean not-found guidance, other e
   const other = readFailureText("main.c", "permission denied: main.c");
   assert.equal(other, "permission denied: main.c", "non-not-found errors pass through verbatim");
 
-  // The wire shape uses the guidance on the error arm.
-  const reply = encodeNativeResultFromPi(
-    { case: "readArgs", path: "main.c" },
-    "Error: ENOENT: no such file or directory, access '/x/main.c'",
-    true,
-  );
+  // A looser not-found text keeps the guidance on the error arm.
+  const reply = encodeNativeResultFromPi({ case: "readArgs", path: "main.c" }, "Error: file not found: main.c", true);
   let errText = "";
   forEachField(reply.frames[0]!.resultBytes, (f, w, r) => {
     if (f !== 2) return skipUnknown(r, w, f);
@@ -570,4 +566,35 @@ test("T-NATIVE: read of a missing file returns clean not-found guidance, other e
     });
   });
   assert.match(errText, /File does not exist: main\.c/);
+});
+
+test("T-NATIVE: an ENOENT read answers ReadResult.file_not_found so Cursor's Write can create the file", () => {
+  // Live-found: Cursor's Write reads the target first; on the error arm it aborts and never sends writeArgs.
+  for (const text of [
+    "Error: ENOENT: no such file or directory, access '/tmp/new.txt'",
+    "[Script error: Error: ENOENT: no such file or directory, open '/tmp/new.txt']",
+  ]) {
+    const reply = encodeNativeResultFromPi({ case: "readArgs", path: "/tmp/new.txt" }, text, true);
+    assert.equal(reply.frames[0]?.resultField, 7);
+    let arm = -1;
+    let pathOut = "";
+    forEachField(reply.frames[0]!.resultBytes, (f, w, r) => {
+      arm = f;
+      forEachField(expectBytes(r, w), (f2, w2, r2) => {
+        if (f2 === 1) pathOut = expectString(r2, w2);
+        else skipUnknown(r2, w2, f2);
+      });
+    });
+    assert.equal(arm, 4, "file_not_found arm");
+    assert.equal(pathOut, "/tmp/new.txt");
+  }
+  for (const text of ["permission denied: /tmp/new.txt", "EISDIR: illegal operation on a directory"]) {
+    const reply = encodeNativeResultFromPi({ case: "readArgs", path: "/tmp/new.txt" }, text, true);
+    let arm = -1;
+    forEachField(reply.frames[0]!.resultBytes, (f, w, r) => {
+      arm = f;
+      skipUnknown(r, w, f);
+    });
+    assert.equal(arm, 2, "other read failures stay on the error arm");
+  }
 });
