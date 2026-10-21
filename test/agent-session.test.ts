@@ -1169,3 +1169,162 @@ test("T-AGENT-SESSION: a real Pi tool call resets the miss budget", async () => 
     __resetAgentRunsForTests();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Cursor AskQuestion → Pi ask_user_question
+// ---------------------------------------------------------------------------
+
+const ASK_TOOL = {
+  name: "ask_user_question",
+  description: "Ask the user structured questions",
+  jsonSchema: { type: "object", properties: { questions: { type: "array" } }, required: ["questions"] },
+};
+
+/** AgentServerMessage.interaction_query (7) → ask_question_interaction_query (3). */
+function askQueryFrame(id: number): Uint8Array {
+  const option = (oid: string, label: string) =>
+    encodeFields((w) => {
+      writeString(w, 1, oid);
+      writeString(w, 2, label);
+    });
+  const question = encodeFields((w) => {
+    writeString(w, 1, "db");
+    writeString(w, 2, "Which database?");
+    writeBytes(w, 3, option("pg", "Postgres"));
+    writeBytes(w, 3, option("my", "MySQL"));
+  });
+  const ask = encodeFields((w) => {
+    writeBytes(w, 1, encodeFields((aw) => writeBytes(aw, 2, question)));
+    writeString(w, 2, "tc-ask");
+  });
+  const query = encodeFields((w) => {
+    writeUint32Always(w, 1, id);
+    writeBytes(w, 3, ask);
+  });
+  return encodeFields((w) => writeBytes(w, 7, query));
+}
+
+/** (id, result arm, selected option ids, message) of an interaction_response (outer field 6). */
+function askReplyOf(body: Uint8Array): { id: number; arm: number; selected: string[]; message: string } | undefined {
+  let out: { id: number; arm: number; selected: string[]; message: string } | undefined;
+  forEachField(body, (field, wire, reader) => {
+    if (field !== 6) return skipUnknown(reader, wire, field);
+    const reply = { id: -1, arm: -1, selected: [] as string[], message: "" };
+    forEachField(expectBytes(reader, wire), (f, w, r) => {
+      if (f === 1) reply.id = expectVarint(r, w);
+      else if (f === 3) {
+        forEachField(expectBytes(r, w), (rf, rw, rr) => {
+          if (rf !== 1) return skipUnknown(rr, rw, rf);
+          forEachField(expectBytes(rr, rw), (arm, aw, ar) => {
+            reply.arm = arm;
+            forEachField(expectBytes(ar, aw), (pf, pw, pr) => {
+              if (arm === 1 && pf === 1) {
+                forEachField(expectBytes(pr, pw), (xf, xw, xr) => {
+                  if (xf === 2) reply.selected.push(expectString(xr, xw));
+                  else skipUnknown(xr, xw, xf);
+                });
+              } else if (pf === 1) reply.message = expectString(pr, pw);
+              else skipUnknown(pr, pw, pf);
+            });
+          });
+        });
+      } else skipUnknown(r, w, f);
+    });
+    out = reply;
+  });
+  return out;
+}
+
+test("T-AGENT-SESSION: Cursor AskQuestion lifts to Pi ask_user_question; the answer returns as option ids", async () => {
+  __resetAgentRunsForTests();
+  const fake = await listen();
+  let opened = false;
+  const replies: NonNullable<ReturnType<typeof askReplyOf>>[] = [];
+  fake.onStream((stream) => {
+    stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+    const decoder = new ConnectFrameDecoder();
+    stream.on("data", (chunk: Uint8Array) => {
+      for (const frame of decoder.push(chunk)) {
+        if (frame.endOfStream) continue;
+        if (!opened) {
+          opened = true;
+          writeProto(stream, askQueryFrame(9));
+          continue;
+        }
+        const reply = askReplyOf(frame.body);
+        if (!reply) continue;
+        replies.push(reply);
+        writeProto(stream, textDelta("got it"));
+        writeProto(stream, turnEnded());
+        writeTrailer(stream);
+      }
+    });
+  });
+  try {
+    const irAsk = (messages: InferenceIR["messages"]): InferenceIR => ir({ sessionId: "sess-ask", tools: [ASK_TOOL], messages });
+    const first = await runAgentSession({ token: "tok", ir: irAsk([{ role: "user", text: "ping" }]), origin: fake.origin });
+    const call = first.events.find((e) => e.type === "tool_call");
+    assert.ok(call && call.type === "tool_call");
+    assert.equal(call.name, "ask_user_question");
+    assert.deepEqual(call.arguments, {
+      questions: [
+        {
+          question: "Which database?",
+          header: "Question 1",
+          options: [
+            { label: "Postgres", description: "" },
+            { label: "MySQL", description: "" },
+          ],
+          multiSelect: false,
+        },
+      ],
+    });
+    const done = first.events.find((e) => e.type === "done");
+    assert.equal(done && done.type === "done" ? done.stopReason : "", "toolUse");
+
+    const details = { cancelled: false, answers: [{ questionIndex: 0, question: "Which database?", kind: "option", answer: "MySQL" }] };
+    const second = await runAgentSession({
+      token: "tok",
+      ir: irAsk([
+        { role: "user", text: "ping" },
+        { role: "assistant", toolCalls: [{ id: call.id, name: "ask_user_question", arguments: call.arguments ?? {} }] },
+        {
+          role: "tool",
+          toolResult: { toolCallId: call.id, toolName: "ask_user_question", result: "User has answered", isError: false, details },
+        },
+      ]),
+      origin: fake.origin,
+    });
+    assert.equal(second.events.some((e) => e.type === "text" && e.delta === "got it"), true);
+    assert.deepEqual(replies, [{ id: 9, arm: 1, selected: ["my"], message: "" }]);
+  } finally {
+    fake.server.close();
+    __resetAgentRunsForTests();
+  }
+});
+
+test("T-AGENT-SESSION: AskQuestion without the Pi tool answers an error in-band, never a tool call", async () => {
+  __resetAgentRunsForTests();
+  const fake = await listen();
+  const replies: NonNullable<ReturnType<typeof askReplyOf>>[] = [];
+  fake.onStream(
+    serveFrames([askQueryFrame(4)], {
+      endAfter: 1,
+      onReply: (body) => {
+        const reply = askReplyOf(body);
+        if (reply) replies.push(reply);
+      },
+    }),
+  );
+  try {
+    const result = await runAgentSession({ token: "tok", ir: ir({ sessionId: "sess-ask-none" }), origin: fake.origin });
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0]?.id, 4);
+    assert.equal(replies[0]?.arm, 2, "AskQuestionResult.error");
+    assert.match(replies[0]?.message ?? "", /do NOT treat this as a decline/);
+    assert.equal(result.events.some((e) => e.type === "tool_call"), false);
+  } finally {
+    fake.server.close();
+    __resetAgentRunsForTests();
+  }
+});

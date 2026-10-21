@@ -419,10 +419,6 @@ export function interactionRejectString(resultField: number, reason: string): Ui
   return encodeNested(2, encodeStringField(1, reason));
 }
 
-export function askQuestionError(reason: string): Uint8Array {
-  return encodeNested(1, encodeNested(2, encodeStringField(1, reason)));
-}
-
 export function createPlanError(reason: string): Uint8Array {
   return encodeNested(1, encodeNested(2, encodeStringField(1, reason)));
 }

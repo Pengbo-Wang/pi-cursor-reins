@@ -90,8 +90,8 @@ export function isEmptyCurrentTurn(ir: InferenceIR): boolean {
 }
 export function trailingToolResults(
   ir: InferenceIR,
-): Map<string, { result: string; isError: boolean; images: IrImage[] }> {
-  const out = new Map<string, { result: string; isError: boolean; images: IrImage[] }>();
+): Map<string, { result: string; isError: boolean; images: IrImage[]; details?: unknown }> {
+  const out = new Map<string, { result: string; isError: boolean; images: IrImage[]; details?: unknown }>();
   for (let i = ir.messages.length - 1; i >= 0; i -= 1) {
     const msg = ir.messages[i];
     if (msg?.role === "tool" && msg.toolResult) {
@@ -99,6 +99,7 @@ export function trailingToolResults(
         result: resultText(msg.toolResult.result),
         isError: msg.toolResult.isError,
         images: msg.toolResult.images ?? [],
+        details: msg.toolResult.details,
       });
       continue;
     }

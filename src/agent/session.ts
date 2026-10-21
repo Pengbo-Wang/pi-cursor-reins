@@ -21,6 +21,8 @@ import {
   encodeExecStreamClose,
   encodeExecHeartbeat,
   encodeExecThrow,
+  decodeAskQuestionQuery,
+  encodeAskQuestionError,
   encodeInteractionResponse,
   encodeKvGetResult,
   encodeKvSetResult,
@@ -28,6 +30,7 @@ import {
   encodeMcpToolNotFound,
   encodeRequestContextSuccess,
   type DecodedExec,
+  type DecodedQuery,
   type McpToolWire,
 } from "../proto/agent.ts";
 import type { InferenceIR, IrEvent } from "../session/ir.ts";
@@ -36,9 +39,9 @@ import { openConnectBidi, type BidiHooks, type ConnectBidi } from "../transport/
 import { debugLog } from "../transport/debug.ts";
 import { agentRequestHeaders } from "../transport/headers.ts";
 import { assertAllowedOrigin } from "../transport/origin.ts";
+import { encodeAskQuestionFromPi, findAskTool, PI_ASK_TOOL, translateAskQuestion, type AskQuestionLift } from "./ask-question.ts";
 import type { BlobStore } from "./blob-store.ts";
 import {
-  askQuestionError,
   bestCommandTool,
   createPlanError,
   cursorMcpToolName,
@@ -81,6 +84,11 @@ export interface PendingMcp {
    * call: the continuation encodes the native success/error shape, not an
    * MCP result (PROTOCOL-AGENT §5.1). */
   native?: NativeArgs;
+  /** Set when this pending answers a Cursor AskQuestion interaction query: `id`
+   * is the query id and the continuation encodes an InteractionResponse. */
+  ask?: AskQuestionLift;
+  /** Re-sent when a late pending is re-yielded (continueRun). */
+  arguments?: Record<string, unknown>;
 }
 
 interface ActiveRun {
@@ -321,7 +329,7 @@ function continueRun(run: ActiveRun): void {
       type: "tool_call",
       id: pending.toolCallId,
       name: pending.toolName,
-      arguments: {},
+      arguments: pending.arguments ?? {},
       complete: true,
     });
   }
@@ -338,6 +346,12 @@ async function sendMcpResults(run: ActiveRun, ir: InferenceIR): Promise<void> {
       continue;
     }
     const text = truncateToolText(result.result);
+    if (pending.ask) {
+      await run.bidi.write(
+        encodeInteractionResponse(pending.id, 3, encodeAskQuestionFromPi(pending.ask, text, result.isError, result.details)),
+      );
+      continue;
+    }
     if (pending.native) {
       // Native exec translated to a Pi tool call: answer in the native shape
       // (and close the stream for shell_stream), not as an MCP result.
@@ -573,7 +587,42 @@ async function handleExec(run: ActiveRun, exec: DecodedExec): Promise<void> {
   );
 }
 
-async function handleQuery(run: ActiveRun, id: number, queryCase: string, field: number): Promise<void> {
+/** Cursor AskQuestion → Pi `ask_user_question`, so the questionnaire renders in Pi's UI. */
+async function handleAskQuestion(run: ActiveRun, query: DecodedQuery): Promise<void> {
+  const reply = (message: string) => run.bidi.write(encodeInteractionResponse(query.id, 3, encodeAskQuestionError(message)));
+  if (!findAskTool(run.tools, run.ir.tools)) {
+    await reply(
+      `Pi has no ${PI_ASK_TOOL} tool installed, so the questions cannot be shown. The user never saw them — do NOT treat this as a decline. Ask the questions as plain chat text instead.`,
+    );
+    return;
+  }
+  let translation: ReturnType<typeof translateAskQuestion>;
+  try {
+    translation = translateAskQuestion(decodeAskQuestionQuery(query.payload));
+  } catch (err) {
+    debugLog({
+      event: "agent-ask-decode-error",
+      error: err instanceof Error ? err.message : String(err),
+      payloadHex: Buffer.from(query.payload).toString("hex").slice(0, 400),
+    });
+    translation = { ok: false, message: "Pi could not decode the AskQuestion request. Ask the questions as plain chat text instead." };
+  }
+  if (!translation.ok) {
+    debugLog({ event: "agent-ask", action: "reject", reason: translation.message });
+    await reply(translation.message);
+    return;
+  }
+  const toolCallId = crypto.randomUUID();
+  const args = translation.args as unknown as Record<string, unknown>;
+  run.pending.push({ id: query.id, execId: "", toolCallId, toolName: PI_ASK_TOOL, ask: translation.lift, arguments: args });
+  debugLog({ event: "agent-ask", action: "lift", queryId: query.id, questions: translation.lift.questions.length });
+  pushEvent(run, { type: "tool_call", id: toolCallId, name: PI_ASK_TOOL, arguments: args, complete: true });
+  if (run.burst) clearTimeout(run.burst);
+  run.burst = setTimeout(() => yieldNow(run, "toolUse"), MCP_BURST_MS);
+}
+
+async function handleQuery(run: ActiveRun, query: DecodedQuery): Promise<void> {
+  const { id, case: queryCase, field } = query;
   const reason = "Not available through pi-cursor-provider. Use Pi MCP tools instead.";
   if (queryCase === "webSearch" || queryCase === "exaSearch" || queryCase === "exaFetch" || queryCase === "hostedWebFetch") {
     await run.bidi.write(encodeInteractionResponse(id, field === 0 ? 2 : field, interactionApprove(1)));
@@ -584,7 +633,7 @@ async function handleQuery(run: ActiveRun, id: number, queryCase: string, field:
     return;
   }
   if (queryCase === "askQuestion") {
-    await run.bidi.write(encodeInteractionResponse(id, 3, askQuestionError(reason)));
+    await handleAskQuestion(run, query);
     return;
   }
   if (queryCase === "createPlan") {
@@ -698,7 +747,7 @@ async function handleFrame(run: ActiveRun, body: Uint8Array): Promise<void> {
     }
     case "interactionQuery":
       touchWork(run);
-      await handleQuery(run, msg.query.id, msg.query.case, msg.query.field);
+      await handleQuery(run, msg.query);
       return;
   }
 }

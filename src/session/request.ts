@@ -20,7 +20,7 @@ export function estimateTokens(ir: InferenceIR): number {
     chars += m.text?.length ?? 0;
     chars += (m.images?.length ?? 0) * (IMAGE_TOKENS * CHARS_PER_TOKEN);
     chars += JSON.stringify(m.toolCalls ?? []).length;
-    chars += JSON.stringify(m.toolResult ?? {}).length;
+    chars += JSON.stringify(m.toolResult ? { ...m.toolResult, details: undefined } : {}).length;
     chars += (m.toolResult?.images?.length ?? 0) * (IMAGE_TOKENS * CHARS_PER_TOKEN);
     for (const t of m.thinking ?? []) chars += t.text.length;
   }

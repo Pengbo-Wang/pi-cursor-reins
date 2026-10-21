@@ -99,6 +99,7 @@ export function transcriptToIr(
           result: text,
           isError: msg.isError,
           ...(images.length > 0 ? { images } : {}),
+          ...(msg.details !== undefined ? { details: msg.details } : {}),
         },
       });
     }

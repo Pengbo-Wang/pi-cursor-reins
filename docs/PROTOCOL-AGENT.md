@@ -239,7 +239,7 @@ Blob id = SHA-256 of content (32 raw bytes; map key = hex).
 | field | case | reply |
 |---|---|---|
 | 2 | `web_search_request_query` | approve (hosted; not local exec) |
-| 3 | `ask_question_interaction_query` | `AskQuestionResult.error` |
+| 3 | `ask_question_interaction_query` | lifted to Pi `ask_user_question` when registered; the answer returns as `AskQuestionResult.success` (labels → option ids, free text → `freeform_text`), Esc as `rejected`, and unmappable shapes (>4 questions, options outside 2-4) or a missing tool as `error` |
 | 4 | `switch_mode_request_query` | reject |
 | 5 | `exa_search_request_query` | approve (hosted) |
 | 6 | `exa_fetch_request_query` | approve (hosted) |

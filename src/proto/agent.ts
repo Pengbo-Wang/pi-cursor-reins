@@ -130,6 +130,8 @@ export interface DecodedQuery {
     | "setupVm"
     | "hostedWebFetch"
     | "unknown";
+  /** Raw oneof payload bytes, kept for per-case decoders (askQuestion). */
+  payload: Uint8Array;
 }
 
 export type InteractionInner =
@@ -263,11 +265,12 @@ function decodeKv(bytes: Uint8Array): DecodedKv {
 function decodeQuery(bytes: Uint8Array): DecodedQuery {
   let id = 0;
   let field = 0;
+  let payload: Uint8Array = new Uint8Array();
   forEachField(bytes, (f, wire, reader) => {
     if (f === 1) id = expectVarint(reader, wire);
     else if (wire === WireType.LengthDelimited && field === 0) {
       field = f;
-      skipUnknown(reader, wire, f);
+      payload = expectBytes(reader, wire);
     } else skipUnknown(reader, wire, f);
   });
   const cases: DecodedQuery["case"][] = [
@@ -282,7 +285,99 @@ function decodeQuery(bytes: Uint8Array): DecodedQuery {
     "setupVm",
     "hostedWebFetch",
   ];
-  return { id, field, case: cases[field] ?? "unknown" };
+  return { id, field, case: cases[field] ?? "unknown", payload };
+}
+
+export interface AskQuestionOption {
+  id: string;
+  label: string;
+}
+
+export interface AskQuestionItem {
+  id: string;
+  prompt: string;
+  options: AskQuestionOption[];
+  allowMultiple: boolean;
+}
+
+export interface AskQuestionQuery {
+  toolCallId: string;
+  title: string;
+  questions: AskQuestionItem[];
+}
+
+export interface AskQuestionAnswer {
+  questionId: string;
+  selectedOptionIds: string[];
+  freeformText?: string;
+}
+
+function decodeAskQuestionOption(bytes: Uint8Array): AskQuestionOption {
+  const option: AskQuestionOption = { id: "", label: "" };
+  forEachField(bytes, (f, wire, reader) => {
+    if (f === 1) option.id = expectString(reader, wire);
+    else if (f === 2) option.label = expectString(reader, wire);
+    else skipUnknown(reader, wire, f);
+  });
+  return option;
+}
+
+function decodeAskQuestionItem(bytes: Uint8Array): AskQuestionItem {
+  const item: AskQuestionItem = { id: "", prompt: "", options: [], allowMultiple: false };
+  forEachField(bytes, (f, wire, reader) => {
+    if (f === 1) item.id = expectString(reader, wire);
+    else if (f === 2) item.prompt = expectString(reader, wire);
+    else if (f === 3) item.options.push(decodeAskQuestionOption(expectBytes(reader, wire)));
+    else if (f === 4) item.allowMultiple = expectVarint(reader, wire) !== 0;
+    else skipUnknown(reader, wire, f);
+  });
+  return item;
+}
+
+/** AskQuestionInteractionQuery { 1 args: AskQuestionArgs { 1 title, 2 questions }, 2 tool_call_id }. */
+export function decodeAskQuestionQuery(bytes: Uint8Array): AskQuestionQuery {
+  const query: AskQuestionQuery = { toolCallId: "", title: "", questions: [] };
+  forEachField(bytes, (f, wire, reader) => {
+    if (f === 1) {
+      forEachField(expectBytes(reader, wire), (af, aw, ar) => {
+        if (af === 1) query.title = expectString(ar, aw);
+        else if (af === 2) query.questions.push(decodeAskQuestionItem(expectBytes(ar, aw)));
+        else skipUnknown(ar, aw, af);
+      });
+    } else if (f === 2) query.toolCallId = expectString(reader, wire);
+    else skipUnknown(reader, wire, f);
+  });
+  return query;
+}
+
+/** AskQuestionInteractionResponse { 1 result: AskQuestionResult { oneof 1 success | 2 error | 3 rejected } }. */
+function encodeAskQuestionResult(arm: number, armBytes: Uint8Array): Uint8Array {
+  return encodeFields((w) => writeBytesAlways(w, 1, encodeFields((rw) => writeBytesAlways(rw, arm, armBytes))));
+}
+
+export function encodeAskQuestionSuccess(answers: AskQuestionAnswer[]): Uint8Array {
+  const success = encodeFields((w) => {
+    for (const answer of answers) {
+      writeBytesAlways(
+        w,
+        1,
+        encodeFields((aw) => {
+          writeString(aw, 1, answer.questionId);
+          for (const id of answer.selectedOptionIds) writeStringAlways(aw, 2, id);
+          writeString(aw, 3, answer.freeformText);
+        }),
+      );
+    }
+  });
+  return encodeAskQuestionResult(1, success);
+}
+
+export function encodeAskQuestionError(message: string): Uint8Array {
+  return encodeAskQuestionResult(2, encodeFields((w) => writeString(w, 1, message)));
+}
+
+export function encodeAskQuestionRejected(reason: string): Uint8Array {
+  return encodeAskQuestionResult(3, encodeFields((w) => writeString(w, 1, reason)));
 }
 
 function decodeUpdateArm(field: number, payload: Uint8Array): InteractionInner | undefined {

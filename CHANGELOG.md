@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/).
 
+## Unreleased
+
+- **Fixed: Cursor AskQuestion never showed a questionnaire.** The interaction query was answered with `AskQuestionResult.error`, and models reported it as the user skipping the questions. It is now lifted to Pi's `ask_user_question` tool (rpiv-ask-user-question), so the questions render in Pi's UI, and the answer is encoded back as option ids and free text. Esc maps to `rejected`. Shapes Pi cannot render, or a missing tool, return an error that tells the model the user never saw the questions. Tool results now carry Pi's `details` into the IR (excluded from token estimates and never sent to Cursor).
+
 ## 0.3.3 — 2026-10-20
 
 - **Fixed: Cursor Glob returned no file list when `ls` outranked `find`.** Glob is an empty-pattern `grep_args`. Capability ranking prefers `ls`, whose schema has no pattern, and the translator gave up instead of trying `find`. The fallback codemode script ran `find`, but its path list was encoded as a content match with an empty file, which Cursor drops. Glob now uses the first capable tool that accepts a pattern, and the result is encoded as `files_with_matches`.

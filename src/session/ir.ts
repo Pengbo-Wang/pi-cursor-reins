@@ -11,7 +11,15 @@ export interface IrMessage {
   images?: IrImage[];
   toolCalls?: { id: string; name: string; arguments: Record<string, unknown> }[];
   thinking?: { text: string; signature?: string; redacted?: boolean }[];
-  toolResult?: { toolCallId: string; toolName: string; result: unknown; isError: boolean; images?: IrImage[] };
+  toolResult?: {
+    toolCallId: string;
+    toolName: string;
+    result: unknown;
+    isError: boolean;
+    images?: IrImage[];
+    /** Pi's structured tool details; never sent to Cursor (ask_user_question answers). */
+    details?: unknown;
+  };
   responseId?: string;
 }
 
