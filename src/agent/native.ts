@@ -18,7 +18,7 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { capableTools, isCodemodeTool, matchToolFor, schemaProperties } from "./policy.ts";
+import { isCodemodeTool, schemaProperties, servingToolFor } from "./policy.ts";
 import { expectBytes, expectString, expectVarint, forEachField, skipUnknown, WireType } from "../proto/wire.ts";
 import type { DecodedExec } from "../proto/agent.ts";
 import type { IrTool } from "../session/ir.ts";
@@ -532,6 +532,50 @@ function findScript(glob: string, pathArg: string): string {
   ].join("\n");
 }
 
+/**
+ * Shell equivalent of a native Grep/Glob for Pi setups that register no
+ * grep/find tool (pi's defaults are read/bash/edit/write). Prefers rg, which
+ * honors .gitignore like Cursor's own search, and falls back to grep/find.
+ * Piped through head so a no-match exit status never reads as a failure.
+ */
+export function searchShellCommand(args: Extract<NativeArgs, { case: "grepArgs" }>): string {
+  // rg with no path argument searches stdin whenever stdin is not a TTY.
+  const findRoot = args.path === "" ? "." : shellQuote(args.path);
+  const root = ` ${findRoot}`;
+  const lastSeg = (glob: string): string => {
+    const segs = glob.split("/").filter((s) => s !== "" && s !== "." && s !== "**");
+    return segs[segs.length - 1] ?? "*";
+  };
+  const run = (rg: string, fallback: string, limit: number): string =>
+    `{ if command -v rg >/dev/null 2>&1; then ${rg}; else ${fallback}; fi; } 2>&1 | head -${String(limit)}`;
+  if (args.pattern === "" && args.glob !== "") {
+    return run(
+      `rg --files --glob ${shellQuote(args.glob)} --${root}`,
+      `find ${findRoot} -type f -name ${shellQuote(lastSeg(args.glob))}`,
+      200,
+    );
+  }
+  const icase = args.caseInsensitive ? " -i" : "";
+  const rgGlob = args.glob !== "" ? ` --glob ${shellQuote(args.glob)}` : "";
+  const grepGlob = args.glob !== "" ? ` --include=${shellQuote(lastSeg(args.glob))}` : "";
+  const pattern = shellQuote(args.pattern);
+  if (args.outputMode === "files_with_matches") {
+    return run(`rg -l${icase}${rgGlob} -- ${pattern}${root}`, `grep -rIl${icase}${grepGlob} -- ${pattern} ${findRoot}`, 200);
+  }
+  if (args.outputMode === "count") {
+    return run(
+      `rg -c --with-filename${icase}${rgGlob} -- ${pattern}${root}`,
+      `grep -rIc${icase}${grepGlob} -- ${pattern} ${findRoot} | grep -v ':0$'`,
+      200,
+    );
+  }
+  return run(
+    `rg -n --no-heading --with-filename${icase}${rgGlob} -- ${pattern}${root}`,
+    `grep -rIn${icase}${grepGlob} -- ${pattern} ${findRoot}`,
+    500,
+  );
+}
+
 function deleteScript(pathArg: string): string {
   const q = shellQuote(pathArg);
   return bashScript(`sz=$(wc -c < ${q}) && rm -- ${q} && printf 'D0:%s\\n' "$sz"`);
@@ -568,7 +612,7 @@ function translateDeclared(
   switch (args.case) {
     case "shellArgs":
     case "shellStreamArgs": {
-      const tool = matchToolFor(args.case, tools);
+      const tool = servingToolFor(args.case, tools);
       if (!tool) return null;
       const keys = schemaProperties(tool);
       const out: Record<string, unknown> = {};
@@ -588,7 +632,7 @@ function translateDeclared(
       return { tool, args: out };
     }
     case "readArgs": {
-      const tool = matchToolFor("readArgs", tools);
+      const tool = servingToolFor("readArgs", tools);
       if (!tool) return null;
       const keys = schemaProperties(tool);
       const out: Record<string, unknown> = {};
@@ -596,7 +640,7 @@ function translateDeclared(
       return { tool, args: out };
     }
     case "writeArgs": {
-      const tool = matchToolFor("writeArgs", tools);
+      const tool = servingToolFor("writeArgs", tools);
       if (!tool) return null;
       const keys = schemaProperties(tool);
       const out: Record<string, unknown> = {};
@@ -611,7 +655,7 @@ function translateDeclared(
       // result and then stall the turn forever; reporting the REAL pre-delete
       // size completes the turn. So the composite command captures the size
       // before rm and prints it behind a D0: marker for the result encoder.
-      const tool = matchToolFor("deleteArgs", tools);
+      const tool = servingToolFor("deleteArgs", tools);
       if (!tool) return null;
       const keys = schemaProperties(tool);
       const q = shellQuote(args.path);
@@ -623,23 +667,22 @@ function translateDeclared(
     case "grepArgs": {
       if (args.pattern === "" && args.glob !== "") {
         // Cursor's "Glob" (PROTOCOL-AGENT §5.1). `ls` outranks `find` by name, but
-        // its schema has no pattern, so keep walking until a tool can take the glob.
-        // Returning null here drops into a codemode script whose path list Cursor's
-        // Glob result does not accept.
-        for (const tool of capableTools("lsArgs", tools)) {
-          const keys = schemaProperties(tool);
-          const out: Record<string, unknown> = {};
-          if (!putIf(out, keys, ["pattern", "glob", "query"], args.glob)) continue;
-          if (args.path !== "") putIf(out, keys, ["path", "dir", "root"], args.path);
-          return { tool, args: out };
-        }
-        return null;
+        // its schema has no pattern, so servingToolFor walks on to a tool that can
+        // take the glob. A codemode script's path list is not accepted by Cursor's
+        // Glob result, so the shell fallback comes first.
+        const tool = servingToolFor("lsArgs", tools);
+        if (!tool) return shellSearch(args, tools);
+        const keys = schemaProperties(tool);
+        const out: Record<string, unknown> = {};
+        putIf(out, keys, ["pattern", "glob"], args.glob);
+        if (args.path !== "") putIf(out, keys, ["path", "dir", "root"], args.path);
+        return { tool, args: out };
       }
-      const tool = matchToolFor("grepArgs", tools);
-      if (!tool) return null;
+      const tool = servingToolFor("grepArgs", tools);
+      if (!tool) return shellSearch(args, tools);
       const keys = schemaProperties(tool);
       const out: Record<string, unknown> = {};
-      if (!putIf(out, keys, ["pattern", "query", "regex"], args.pattern)) return null;
+      putIf(out, keys, ["pattern", "regex"], args.pattern);
       if (args.path !== "") putIf(out, keys, ["path", "dir", "root"], args.path);
       if (args.glob !== "") putIf(out, keys, ["glob", "include"], args.glob);
       if (args.caseInsensitive) {
@@ -650,6 +693,17 @@ function translateDeclared(
     default:
       return null;
   }
+}
+
+function shellSearch(
+  args: Extract<NativeArgs, { case: "grepArgs" }>,
+  tools: IrTool[],
+): { tool: IrTool; args: Record<string, unknown> } | null {
+  const tool = servingToolFor("shellArgs", tools);
+  if (!tool) return null;
+  const out: Record<string, unknown> = {};
+  putIf(out, schemaProperties(tool), ["command", "cmd", "script", "shell"], searchShellCommand(args));
+  return { tool, args: out };
 }
 
 export function translateNativeToPi(

@@ -143,6 +143,47 @@ export function capableTools(execCase: string, tools: IrTool[]): IrTool[] {
     .map((row) => row.tool);
 }
 
+/**
+ * Argument slots a tool's schema must declare to serve each native case: one
+ * key from every group. Name/description matches alone are not enough — a
+ * `web_search` (name hits "search") or an `edit` (no content key) must never
+ * receive native grep/write args.
+ */
+export const NATIVE_ARG_KEYS: Record<string, string[][]> = {
+  shellArgs: [["command", "cmd", "script", "shell"]],
+  shellStreamArgs: [["command", "cmd", "script", "shell"]],
+  deleteArgs: [["command", "cmd", "script", "shell"]],
+  readArgs: [["path", "file_path", "filePath", "file"]],
+  writeArgs: [["path", "file_path", "filePath", "file"], ["content", "contents", "text"]],
+  grepArgs: [["pattern", "regex"]],
+  lsArgs: [["pattern", "glob"]],
+};
+
+export function findSchemaKey(keys: string[], candidates: string[]): string | undefined {
+  for (const candidate of candidates) {
+    const hit = keys.find((k) => k.toLowerCase() === candidate.toLowerCase());
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/** The best capable tool whose schema can actually take this case's arguments. */
+export function servingToolFor(execCase: string, tools: IrTool[]): IrTool | undefined {
+  const groups = NATIVE_ARG_KEYS[execCase] ?? [];
+  // Search fragments ("ls", "find", "search") hit almost any description; a shell
+  // fallback beats handing a pattern to an unrelated tool.
+  const minScore = NAME_MATCH_ONLY_CASES.has(execCase) ? 3000 - 9 : 1;
+  return scoredTools(execCase, tools)
+    .filter((row) => row.s >= minScore)
+    .map((row) => row.tool)
+    .find((tool) => {
+      const keys = schemaProperties(tool);
+      return groups.every((group) => findSchemaKey(keys, group) !== undefined);
+    });
+}
+
+const NAME_MATCH_ONLY_CASES = new Set(["grepArgs", "lsArgs"]);
+
 /** Exec cases the native translation layer serves (PROTOCOL-AGENT §5.1). */
 const NATIVE_COVERED_CASES = ["shellArgs", "readArgs", "writeArgs", "grepArgs"] as const;
 
@@ -179,7 +220,7 @@ function extraContractLine(tool: IrTool): string {
 
 export function mcpContractText(tools: IrTool[]): string {
   const covered = new Set(
-    NATIVE_COVERED_CASES.map((c) => matchToolFor(c, tools)).filter((t) => t !== undefined),
+    NATIVE_COVERED_CASES.map((c) => servingToolFor(c, tools)).filter((t) => t !== undefined),
   );
   const extras = tools.filter((t) => !covered.has(t));
   if (extras.length === 0) return "";
@@ -200,6 +241,8 @@ export function mcpContractText(tools: IrTool[]): string {
 function hintToolsFor(execCase: string, tools: IrTool[]): IrTool[] {
   const rows = scoredTools(execCase, tools);
   const hits = rows.filter((row) => !isNativeMetaTool(row.tool) && row.s > 0).map((row) => row.tool);
+  const serving = servingToolFor(execCase, tools);
+  if (serving) return [serving, ...hits.filter((t) => t !== serving)];
   if (hits.length > 0) return hits;
   const cm = tools.filter(isCodemodeTool);
   if (cm.length > 0) return cm;

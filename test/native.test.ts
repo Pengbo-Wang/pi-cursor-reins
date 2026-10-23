@@ -215,6 +215,41 @@ test("T-NATIVE: grep maps content args; empty pattern + glob maps to a find-capa
   assert.deepEqual(glob?.args, { pattern: "**/b.txt", path: "/src" });
 });
 
+test("T-NATIVE: pi default tools + web tools: Write skips edit, Grep/Glob never hit web search", () => {
+  const bash = tool("bash", "Execute a bash command", { command: { type: "string" }, timeout: { type: "number" } });
+  const edit = tool("edit", "Edit a file", { path: { type: "string" }, edits: { type: "array" } });
+  const write = tool("write", "Write a file", { path: { type: "string" }, content: { type: "string" } });
+  const webSearch = tool("web_search", "Search the web", { query: { type: "string" }, queries: { type: "array" } });
+  const getContent = tool("get_search_content", "Retrieve stored results of tools", {
+    responseId: { type: "string" },
+    query: { type: "string" },
+  });
+  const tools = [readTool, bash, edit, write, webSearch, getContent];
+
+  const w = translateNativeToPi({ case: "writeArgs", path: "/tmp/a.txt", contents: "hi" }, tools);
+  assert.equal(w?.tool.name, "write");
+  assert.deepEqual(w?.args, { path: "/tmp/a.txt", content: "hi" });
+
+  const grep = translateNativeToPi(
+    { case: "grepArgs", pattern: "needle", glob: "*.ts", path: "src", caseInsensitive: false, outputMode: "content" },
+    tools,
+  );
+  assert.equal(grep?.tool.name, "bash");
+  assert.match(String(grep?.args.command), /rg -n --no-heading --with-filename --glob '\*\.ts' -- 'needle' 'src'/);
+
+  const glob = translateNativeToPi(
+    { case: "grepArgs", pattern: "", glob: "*.json", path: "", caseInsensitive: false, outputMode: "files_with_matches" },
+    tools,
+  );
+  assert.equal(glob?.tool.name, "bash");
+  assert.match(String(glob?.args.command), /rg --files --glob '\*\.json' -- \.;/);
+
+  const text = mcpContractText(tools);
+  assert.match(text, /mcp_pi_web_search\(/, "web_search is not a grep stand-in, so it stays in the contract");
+  assert.match(text, /mcp_pi_edit\(/, "edit is not the Write stand-in, so it stays in the contract");
+  assert.ok(!text.includes("mcp_pi_write("));
+});
+
 /** Pull (field → string) out of a nested message, for result-shape assertions. */
 function stringFields(bytes: Uint8Array): Map<number, string> {
   const out = new Map<number, string>();
