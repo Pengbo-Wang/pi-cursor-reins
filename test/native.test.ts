@@ -683,3 +683,26 @@ test("T-NATIVE: only Pi's trailing read notice marks a read truncated; file text
   );
   assert.deepEqual(capped, { arm: 1, content: "abc", truncated: true });
 });
+
+test("T-NATIVE: a Pi read that returns an image answers on ReadSuccess.data, not the text note", () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const reply = encodeNativeResultFromPi({ case: "readArgs", path: "shot.png" }, "Read image file [image/png]", false, [
+    { data: png, mimeType: "image/png" },
+  ]);
+  assert.equal(reply.frames[0]!.resultField, 7);
+  const seen: { arm: number; path?: string; content?: string; data?: Uint8Array } = { arm: -1 };
+  forEachField(reply.frames[0]!.resultBytes, (f, w, r) => {
+    seen.arm = f;
+    if (f !== 1) return skipUnknown(r, w, f);
+    forEachField(expectBytes(r, w), (f2, w2, r2) => {
+      if (f2 === 1) seen.path = expectString(r2, w2);
+      else if (f2 === 2) seen.content = expectString(r2, w2);
+      else if (f2 === 5) seen.data = expectBytes(r2, w2);
+      else skipUnknown(r2, w2, f2);
+    });
+  });
+  assert.equal(seen.arm, 1);
+  assert.equal(seen.path, "shot.png");
+  assert.equal(seen.content, undefined, "content and data share the output oneof");
+  assert.deepEqual(seen.data, png);
+});

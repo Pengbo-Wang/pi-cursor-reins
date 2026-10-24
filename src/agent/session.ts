@@ -357,7 +357,8 @@ async function sendMcpResults(run: ActiveRun, ir: InferenceIR): Promise<void> {
       );
       continue;
     }
-    if (pending.read && !result.isError) {
+    const images = result.images.map((image) => decodeIrImage(image, "toolResult"));
+    if (pending.read && !result.isError && images.length === 0) {
       // Cursor edits a file only from a complete read, but Pi's read pages at
       // 2000 lines / 50KB: keep the exec parked and fetch the next page.
       const read = parseReadOutput(text);
@@ -377,7 +378,7 @@ async function sendMcpResults(run: ActiveRun, ir: InferenceIR): Promise<void> {
     if (pending.native) {
       // Native exec translated to a Pi tool call: answer in the native shape
       // (and close the stream for shell_stream), not as an MCP result.
-      const reply = encodeNativeResultFromPi(pending.native, text, result.isError);
+      const reply = encodeNativeResultFromPi(pending.native, text, result.isError, images);
       logNativeExec(pending.native.case, pending.execId, reply);
       for (const frame of reply.frames) {
         await run.bidi.write(
@@ -394,7 +395,6 @@ async function sendMcpResults(run: ActiveRun, ir: InferenceIR): Promise<void> {
       }
       continue;
     }
-    const images = result.images.map((image) => decodeIrImage(image, "toolResult"));
     await run.bidi.write(
       encodeExecClientMessage({
         id: pending.id,

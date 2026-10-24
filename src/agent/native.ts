@@ -324,6 +324,21 @@ function readSuccess(pathArg: string, content: string, totalLines: number, trunc
   });
 }
 
+/** ReadSuccess.data (5, `output` oneof with content): Cursor's own Read answers image files with the raw image bytes here. */
+function readImageSuccess(pathArg: string, data: Uint8Array): Uint8Array {
+  return encodeFields((w) => {
+    writeBytesAlways(
+      w,
+      1,
+      encodeFields((s) => {
+        writeString(s, 1, pathArg);
+        writeBytesAlways(s, 5, data);
+        writeInt32(s, 4, data.length);
+      }),
+    );
+  });
+}
+
 function readError(pathArg: string, error: string): Uint8Array {
   return encodeFields((w) => {
     writeBytesAlways(
@@ -777,7 +792,12 @@ function flattenToolText(text: string): string {
   }
 }
 
-export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError: boolean): NativeReply {
+export function encodeNativeResultFromPi(
+  args: NativeArgs,
+  text: string,
+  isError: boolean,
+  images: { data: Uint8Array; mimeType: string }[] = [],
+): NativeReply {
   const unwrapped = unwrapCodemodeResult(text, isError);
   text = unwrapped.text;
   isError = unwrapped.isError;
@@ -807,6 +827,14 @@ export function encodeNativeResultFromPi(args: NativeArgs, text: string, isError
       }
       if (isError) {
         return { frames: [{ resultField: 7, resultBytes: readError(args.path, readFailureText(args.path, text)) }], closeStream: true, summary: `pi read error` };
+      }
+      const image = images[0];
+      if (image) {
+        return {
+          frames: [{ resultField: 7, resultBytes: readImageSuccess(args.path, image.data) }],
+          closeStream: true,
+          summary: `pi read image ${args.path}`,
+        };
       }
       const read = parseReadOutput(text);
       return {

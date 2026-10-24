@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. Format follows
 
 ## Unreleased
 
+- **Fixed: Cursor Read could not see image files.** Native Read is lifted to Pi's `read`, which returns an image file as a short text note plus `ImageContent`. Only the text was encoded back into `ReadResult.success.content`, so the model saw "Read image file [image/png]" and never the pixels. When Pi's read returns an image, the bytes now go on `ReadSuccess.data` (field 5), the same arm Cursor's own Read uses for images, and read paging is skipped.
+
 - **Fixed: Cursor refused to edit files it had read only partially.** A content-wide regex marked any file containing `[...truncat` as truncated (this repo's own `native.ts` included), and Cursor's edit tool then declined to write. Only Pi's trailing read notice counts now, and it is stripped from the content. Files beyond Pi's 2000-line / 50KB read page are fetched page by page via `offset` before Cursor is answered, up to 512KB; past that the read stays marked truncated.
 
 - **Fixed: Cursor Write could not create new files.** Cursor's Write reads the target first, and the ENOENT from Pi's `read` was encoded as `ReadResult.error`, so Cursor aborted before sending `writeArgs`. A definite missing-path error (ENOENT / "no such file or directory") now answers `ReadResult.file_not_found`; other read failures stay on the error arm.
